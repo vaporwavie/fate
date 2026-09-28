@@ -168,6 +168,90 @@ test('live view subscriptions merge pushed records into the cache', () => {
   dispose();
 });
 
+test('live view subscriptions include fields of views spread into the view', () => {
+  let handlers: any;
+  const subscribeById = vi.fn((_type, _id, _select, _args, nextHandlers) => {
+    handlers = nextHandlers;
+    return vi.fn();
+  });
+  const client = createClient({
+    roots: {},
+    transport: {
+      async fetchById() {
+        return [];
+      },
+      subscribeById,
+    },
+    types: [
+      { type: 'User' },
+      { fields: { author: { type: 'User' } }, type: 'Comment' },
+      { fields: { comments: { listOf: 'Comment' } }, type: 'Post' },
+    ],
+  });
+
+  const AuthorView = view<User>()({ id: true, name: true });
+  const CommentView = view<Comment>()({ author: AuthorView, content: true, id: true });
+  const PostStatsView = view<Post>()({ likes: true });
+  const PostView = view<Post>()({
+    ...PostStatsView,
+    comments: { ...CommentView },
+    id: true,
+  });
+  const postRef = client.ref<Post>('Post', 'post-1', PostView);
+  const dispose = client.subscribeLiveView(PostView, postRef);
+
+  const call = subscribeById.mock.calls[0];
+  if (!call) {
+    throw new Error('Expected subscribeById to be called.');
+  }
+  expect([...(call[2] as Set<string>)].sort()).toEqual([
+    'comments.author.id',
+    'comments.author.name',
+    'comments.content',
+    'comments.id',
+    'id',
+    'likes',
+  ]);
+
+  handlers.onData({
+    __typename: 'Post',
+    comments: [
+      {
+        __typename: 'Comment',
+        author: { __typename: 'User', id: 'user-1', name: 'Live Author' },
+        content: 'Live Comment',
+        id: 'comment-1',
+      },
+    ],
+    id: 'post-1',
+    likes: 7,
+  });
+
+  const post = unwrap(
+    client.readView<Post, SelectionOf<typeof PostView>, typeof PostView>(PostView, postRef),
+  );
+  expect(post).not.toHaveProperty('likes');
+  expect(unwrap(client.readView(PostStatsView, post))).toMatchObject({ likes: 7 });
+
+  const [commentRef] = post.comments;
+  if (!commentRef) {
+    throw new Error('Expected a comment ref.');
+  }
+  expect(commentRef).not.toHaveProperty('content');
+  const comment = unwrap(
+    client.readView<Comment, SelectionOf<typeof CommentView>, typeof CommentView>(
+      CommentView,
+      commentRef,
+    ),
+  );
+  expect(comment).toMatchObject({ content: 'Live Comment' });
+  expect(unwrap(client.readView(AuthorView, comment.author!))).toMatchObject({
+    name: 'Live Author',
+  });
+
+  dispose();
+});
+
 test('live view subscriptions preserve cached scalars outside narrowed updates', () => {
   type LivePost = { __typename: 'Post'; id: string; likes: number; title: string };
 
